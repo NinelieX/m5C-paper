@@ -1,0 +1,285 @@
+#ConsensusCluster
+library(ConsensusClusterPlus)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(survival)
+library(ggord)
+library(survminer)
+
+consensuscluster <- ConsensusClusterPlus(exprset,
+                            maxK = 6, reps = 500, pItem = 0.8, pFeature = 1, title = "cluster",
+                            innerLinkage = "complete", seed = 123456, plot = "pdf", 
+                            clusterAlg = "pam", corUse = "complete.obs", writeTable = T) 
+
+cluster <- read.csv("cluster.k=2.consensusClass.csv",header = F,stringsAsFactors = F)
+cluster <- merge(cluster,TCGA_clinical,by="sampleID")
+
+Sur <- Surv(cluster$OStime,cluster$OS)
+sfit <- survfit(Sur ~ group,data=cluster)
+ggsurvplot(sfit,
+           pval=TRUE,
+           pval.method = T,
+           risk.table =T,
+           palette =c("#e33d01","#2682b7"),
+           surv.median.line="hv",
+           legend.labs=c("cluster1","cluster2"))+
+  labs(x = "Day")
+
+
+#Generation of heatmap
+library(pheatmap)
+library(tibble)
+library(dplyr)
+
+annotation_col <- select(cluster,sampleID,group,cancer, gender, Grade, age, IDH, pq,MGMT,tp_subtype) 
+annotation_col<-column_to_rownames(annotation_col,var="sampleID")
+ann_colors=list(Grade=c(G1="#006E90",G2="#B1DDF1",G3="#9F87AF",G4="#88527F"),
+group=c(cluster1="#70D6FF",cluster2="#FF70A6"),
+cancer=c(LGG="#C9DDFF",GBM="#ECB0E1"),
+gender=c(Female="#E7E6F7",Male="#E3D0D8"),
+age=c("#5B85AA","#F46036"),
+IDH=c(Mutant="#DAD7CD",WT="#A3B18A"),
+pq=c(codel="#B8B8D1",noncodel="#5B5F97"),
+MGMT=c(Methylated="#083D77",Unmethylated="#EBEBD3"),
+tp_subtype=c(PN="#037171",CL="#FCEADE",NE="#FF8A5B",ME="#715B64"))
+
+heatTCGA <- TCGA[,rownames(annotation_col)] 
+pheatmap(heatTCGA, 
+         method = "spearman", 
+         cluster_rows=T, cluster_cols=F,
+         cellwidth = 0.3, cellheight = 3, fontsize = 4, fontsize_row= 3,
+         color = colorRampPalette(c("navy","white","red"))(100),
+         scale="row",show_rownames = T,show_colnames = F,
+         border_color = "NA",
+         annotation_col = annotation_col,
+         annotation_colors = ann_colors)
+
+#univaraite and multivariate Cox analysis
+rm(outTab)
+outTab=data.frame()
+for(i in colnames(for_cox[,2:10])){
+  cox <- coxph(Surv(OStime, OS) ~ for_cox[,i], data = for_cox)
+  coxSummary = summary(cox)
+  coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+  outTab=rbind(outTab,
+               cbind(id=i,
+                     coef=coxSummary$coefficients[,"coef"],
+                     HR=coxSummary$conf.int[,"exp(coef)"],
+                     HR.95L=coxSummary$conf.int[,"lower .95"],
+                     HR.95H=coxSummary$conf.int[,"upper .95"],
+                     pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+  )
+}
+##multivariate cox
+for_cox<-merge(select(CD74_tcga,sampleID,CD74),for_cox_tcga)
+formula<-as.formula(paste0('Surv(OStime,OS)~',paste0(colnames(for_cox)[2:10],sep='',collapse = '+')))
+multicox<-coxph(formula,data=for_cox)
+
+coef=summary(multicox)$coefficients[,"coef"]
+HR=summary(multicox)$conf.int[,"exp(coef)"]
+HR.95L=summary(multicox)$conf.int[,"lower .95"]
+HR.95H=summary(multicox)$conf.int[,"upper .95"]
+P<-coef(summary(multicox))[,5]
+table <- as.data.frame(cbind(coef, HR,HR.95L,HR.95H,P))
+write.csv(table,"multicox.csv")
+
+
+#SNV
+library(tibble)
+library(dplyr)
+library(maftools)
+maftotal <- read.maf(maf = mutunion, clinicalData = cliquery2, isTCGA = T)
+pdf("oncoplotTop_1_20.pdf",width = 12,height = 6)
+oncoplot(maf = maftotal,
+         top = 20
+)
+dev.off()
+
+#cluster1
+cluster1sample <- unionPDI$sampleID[1:158]
+cluster1mut <- mutglioma[substr(mutglioma$Tumor_Sample_Barcode,1,15)%in%cluster1sample ,]
+mafc1 <- read.maf(maf = cluster1mut , clinicalData = cliquery2, isTCGA = T)
+pdf("oncoplotTop_cluster1.pdf",width = 12,height = 6)
+oncoplot(maf = mafc1,
+         top = 20,writeMatrix = T
+)
+dev.off()
+
+class(cluster1mut)
+laml.titv = titv(maf = mafc1, plot = FALSE, useSyn = TRUE)
+plotTiTv(res = laml.titv)
+
+#cluster2
+cluster2sample <- unionPDI$sampleID[159:633]
+cluster2mut <- mutglioma[substr(mutglioma$Tumor_Sample_Barcode,1,15)%in%cluster2sample ,]
+mafc2 <- read.maf(maf = cluster2mut , clinicalData = cliquery2, isTCGA = T)
+pdf("oncoplotTop_cluster2.pdf",width = 12,height = 6)
+oncoplot(maf = mafc2,
+         top = 20,writeMatrix = T
+)
+dev.off()
+
+class(cluster2mut)
+laml.titv = titv(maf = mafc2, plot = FALSE, useSyn = TRUE)
+plotTiTv(res = laml.titv)
+
+
+#GSEA 
+library(limma)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(tibble)
+library(enrichplot)
+group_list=factor(annotation_col$group, levels=c("cluster1","cluster2"))
+design<-model.matrix(~0+factor(group_list))
+colnames(design)=levels(factor(group_list))
+contrast.matrix<-makeContrasts("cluster1-cluster2", levels = design)
+
+exprSet<-exprSet[,rownames(annotation_col)]
+fit3 <- lmFit(exprSet,design)
+fit4 <- contrasts.fit(fit3, contrast.matrix) 
+fit4 <- eBayes(fit4)
+
+allDiff <- topTable(fit4, number = Inf, adjust.method = 'fdr')
+write.table(allDiff,file="allDiff.txt",sep="\t",row.names=T,quote=F)
+
+allDiff <-  subset(allDiff,allDiff$P.Value<0.05)
+allDiff <- rownames_to_column(allDiff,var="gene")
+
+df <- select(allDiff,gene,logFC)
+names(df)[1] <- c("SYMBOL")
+df.id<-bitr(df$SYMBOL, fromType = "SYMBOL", toType = "ENTREZID",OrgDb = "org.Hs.eg.db")
+easy.df<-merge(df,df.id,by="SYMBOL",all=F)
+#按照foldchange排序
+sortdf<-easy.df[order(easy.df$logFC, decreasing = T),]
+gene.expr = sortdf$logFC
+names(gene.expr) <- sortdf$ENTREZID
+
+
+go <- gseGO(gene.expr, ont="BP",'org.Hs.eg.db',pvalueCutoff = 0.05, pAdjustMethod = "BH")
+sortgo<-go[order(go$enrichmentScore, decreasing = T),]
+write.csv(sortgo,"TCGA_LGGGBM_PDISIG_GSEAGO.csv")
+
+gopaths <- c("GO:0034123","GO:0090594","GO:2000484","GO:0010820","GO:0034143","GO:0071677")
+gseaplot2(go,gopaths)
+
+KEGG <- gseKEGG(gene.expr,organism = "hsa",pvalueCutoff = 0.05, pAdjustMethod = "BH")
+sortkegg<-KEGG[order(KEGG$enrichmentScore, decreasing = T),]
+write.csv(sortkegg,"TCGA_LGGGBM_PDISIG_GSEAKEGG.csv")
+
+keggpaths <- c("hsa04621","hsa04658","hsa04060","hsa04668","hsa04620","hsa04064")
+gseaplot2(KEGG,keggpaths)
+
+
+#Enrichment plot
+library(clusterProfiler)
+library(org.Hs.eg.db)
+DEG.gene_symbol = as.character(output.gene_id$gene_id) 
+DEG.entrez_id = mapIds(x = org.Hs.eg.db, keys = DEG.gene_symbol,  keytype = "SYMBOL", column = "ENTREZID")
+DEG.entrez_id = na.omit(DEG.entrez_id)       
+
+erich.go.BP = enrichGO(gene = DEG.entrez_id,
+                       OrgDb = org.Hs.eg.db,
+                       keyType = "ENTREZID",
+                       ont = "BP",  
+                       pvalueCutoff = 0.05,
+                       qvalueCutoff = 0.05)
+erich.go.CC= enrichGO(gene = DEG.entrez_id,
+                       OrgDb = org.Hs.eg.db,
+                       keyType = "ENTREZID",
+                       ont = "CC",  
+                       pvalueCutoff = 0.05,
+                       qvalueCutoff = 0.05)
+erich.go.MF= enrichGO(gene = DEG.entrez_id,
+                       OrgDb = org.Hs.eg.db,
+                       keyType = "ENTREZID",
+                       ont = "MF",  
+                       pvalueCutoff = 0.05,
+                       qvalueCutoff = 0.05)
+enrich_go_KEGG<-enrichKEGG(gene = DEG.entrez_id, organism = 'hsa',
+                           keyType = 'kegg',pvalueCutoff = 0.05)
+                           
+dotplot(erich.go.BP,font.size=15) 
+dotplot(erich.go.CC,font.size=15)
+dotplot(erich.go.MF,font.size=15)
+dotplot(enrich_go_KEGG,font.size=15)
+
+GO<-read.table('GO_enrichment.xls',sep = '\t',header = T,row.names = 1)
+GOterm<-c("GO:0002446","GO:0019882","GO:0071496","GO:0060070","GO:0051092","GO:0050863","GO:0045088","GO:0070498","GO:0097028","GO:0030888")
+GO<-GO[GOterm,]
+GO$category<-'GO'
+
+kegg<-read.table('kegg_enrichment.xls',sep = '\t',header = T,row.names = 1)
+keggterm<-c("hsa05215","hsa05210","hsa05214","hsa04350","hsa04750","hsa04662","hsa04330","hsa04064")
+kegg<-kegg[keggterm,]
+kegg$category<-'kegg'
+
+#install.packages('GOplot')
+library(GOplot)
+
+circ <- circle_dat(GO,df)
+circ<-circle_dat(kegg,df)
+GOBubble(circ, labels = 3)
+GOCircle(circ)
+
+
+#circos
+library(circlize)
+library(ComplexHeatmap)
+library(corrr)
+library(dplyr)
+library(tibble)
+
+cor1<-correlate(cc[2:10], method = 'spearman',use="pairwise.complete.obs")
+cor1<-shave(cor1)%>%column_to_rownames(var="rowname")
+mat<-t(cor1)
+
+grid_col<-c("#FF6A6A","#4876FF","#FFA500","#32CD32","#A020F0","#FF6EB4","#87CEFF","#FA8072","#FFD700")
+col_fun = colorRamp2(c(-1, 0, 1), c("green", "white", "red"))
+chordDiagram(mat, grid.col = grid_col, col = col_fun)
+circos.clear()
+lgd = Legend(col_fun = col_fun, title = "") 
+draw(lgd)
+
+
+#ESTIMATE
+library(estimate)
+library(tibble)
+filterCommonGenes(input.f = 'TCGA_LGG_RNA-seq_Counts.txt', output.f = "TGGA.gct",id="EntrezID")
+ 
+estimateScore(input.ds = "TGGA.gct",output.ds = "estimatescore.gct", platform="illumina")
+
+scores=read.table("estimatescore.gct",skip = 2,header = T)
+rownames(scores)=scores[,1]
+scores=t(scores[,3:ncol(scores)])
+
+#TimeROC
+library(survivalROC)
+risk365<-survivalROC(Stime = Risk_score$OStime, status = Risk_score$OS,marker = Risk_score$Risk_score,predict.time = 365,method = 'KM')
+risk1095<-survivalROC(Stime = Risk_score$OStime, status = Risk_score$OS,marker = Risk_score$Risk_score,predict.time = 1095,method = 'KM')
+risk1825<-survivalROC(Stime = Risk_score$OS, status = Risk_score$Censor,marker = Risk_score$Risk_score,predict.time = 1825,method = 'KM')
+
+plot(risk365$FP,risk365$TP,type="l", col="red",xlim = c(0,1),ylim = c(0,1),xlab = "1-specificity",ylab = "Sensitivity") #type是L不是1
+abline(0,1,col="gray")#画出斜线
+
+#lines可以在原来基础上继续画图
+lines(risk1095$FP,risk1095$TP,type="l", col="green",xlim = c(0,1),ylim = c(0,1))
+lines(risk1825$FP,risk1825$TP,type="l", col="blue",xlim = c(0,1),ylim = c(0,1))
+
+#添加legend
+legend(0.6,0.2,c(paste("AUC(one year) =",round(risk365$AUC,3)),
+                 paste("AUC(three year) =",round(risk1095$AUC,3)),
+                        paste("AUC(five year) =",round(risk1825$AUC,3))),
+                 x.intersp=1, y.intersp=0.8,
+                 lty= 1 ,lwd= 2,col=c("red","green","blue"),
+                 bty = "n",# bty框的类型
+                 seg.len=1,cex=1)
+                
+#corrplot
+library(corrplot)
+corrplot(cor1, method = 'number', diag = FALSE, tl.cex = 0.8)
+corrplot(cor1, add = TRUE, type = 'upper', method = 'circle', diag = FALSE, tl.pos = 'n', cl.pos = 'n')
+
+
